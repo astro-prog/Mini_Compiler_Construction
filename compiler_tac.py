@@ -36,7 +36,34 @@ def tokenize(code):
     return tokens
 
 # ==========================================
-# 2. AST NODES
+# 2. SYMBOL TABLE
+# ==========================================
+class SymbolTable:
+    def __init__(self):
+        self.scopes = [{}]
+
+    def enter_scope(self):
+        self.scopes.append({})
+
+    def exit_scope(self):
+        self.scopes.pop()
+
+    def insert(self, name):
+        self.scopes[-1][name] = True
+
+    def lookup(self, name):
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return True
+        return False
+
+    def display(self):
+        print("\n--- Symbol Table ---")
+        for i, scope in enumerate(self.scopes):
+            print(f"Scope {i}: {list(scope.keys())}")
+
+# ==========================================
+# 3. AST NODES
 # ==========================================
 class ASTNode: pass
 class Assign(ASTNode):
@@ -55,12 +82,13 @@ class WhileStmt(ASTNode):
         self.cond, self.body = cond, body
 
 # ==========================================
-# 3. PARSER (Recursive Descent)
+# 4. PARSER
 # ==========================================
 class Parser:
     def __init__(self, tokens):
         self.tokens = tokens
         self.pos = 0
+        self.symtab = SymbolTable()
 
     def current_token(self):
         return self.tokens[self.pos] if self.pos < len(self.tokens) else ('EOF', '')
@@ -70,42 +98,53 @@ class Parser:
         if kind == expected_kind:
             self.pos += 1
             return value
-        raise SyntaxError(f"Expected {expected_kind}, got {kind} ('{value}')")
+        raise SyntaxError(f"Expected {expected_kind}, got {kind}")
 
     def parse(self):
-        statements = []
+        stmts = []
         while self.current_token()[0] != 'EOF':
-            statements.append(self.parse_statement())
-        return statements
+            stmts.append(self.parse_statement())
+        return stmts
 
     def parse_statement(self):
         kind = self.current_token()[0]
         if kind == 'IF': return self.parse_if()
         elif kind == 'WHILE': return self.parse_while()
         elif kind == 'ID': return self.parse_assign()
-        else: raise SyntaxError(f"Unexpected token in statement: {self.current_token()}")
+        else: raise SyntaxError("Invalid statement")
 
     def parse_assign(self):
-        var_name = self.match('ID')
+        var = self.match('ID')
         self.match('ASSIGN')
         expr = self.parse_expression()
         self.match('SEMI')
-        return Assign(var_name, expr)
+
+        if not self.symtab.lookup(var):
+            self.symtab.insert(var)
+
+        return Assign(var, expr)
 
     def parse_if(self):
         self.match('IF')
         self.match('LPAREN')
         cond = self.parse_expression()
         self.match('RPAREN')
+
         self.match('LBRACE')
+        self.symtab.enter_scope()
         true_branch = self.parse_block()
+        self.symtab.exit_scope()
         self.match('RBRACE')
+
         false_branch = []
         if self.current_token()[0] == 'ELSE':
             self.match('ELSE')
             self.match('LBRACE')
+            self.symtab.enter_scope()
             false_branch = self.parse_block()
+            self.symtab.exit_scope()
             self.match('RBRACE')
+
         return IfStmt(cond, true_branch, false_branch)
 
     def parse_while(self):
@@ -113,9 +152,13 @@ class Parser:
         self.match('LPAREN')
         cond = self.parse_expression()
         self.match('RPAREN')
+
         self.match('LBRACE')
+        self.symtab.enter_scope()
         body = self.parse_block()
+        self.symtab.exit_scope()
         self.match('RBRACE')
+
         return WhileStmt(cond, body)
 
     def parse_block(self):
@@ -125,7 +168,6 @@ class Parser:
         return stmts
 
     def parse_expression(self):
-        # Parses math and relational expressions
         left = self.parse_term()
         while self.current_token()[0] in ('OP', 'RELOP'):
             op = self.match(self.current_token()[0])
@@ -139,115 +181,126 @@ class Parser:
             self.pos += 1
             return Num(val)
         elif kind == 'ID':
+            if not self.symtab.lookup(val):
+                raise NameError(f"Variable '{val}' not declared")
             self.pos += 1
             return Var(val)
-        raise SyntaxError(f"Expected Number or ID, got {kind}")
+        raise SyntaxError("Invalid expression")
 
 # ==========================================
-# 4. TAC GENERATOR (Intermediate Code)
+# 5. TAC GENERATOR
 # ==========================================
 class TACGenerator:
     def __init__(self):
-        self.tac_code = []
-        self.temp_count = 0
-        self.label_count = 0
+        self.code = []
+        self.temp = 0
+        self.label = 0
 
     def new_temp(self):
-        self.temp_count += 1
-        return f"t{self.temp_count}"
+        self.temp += 1
+        return f"t{self.temp}"
 
     def new_label(self):
-        self.label_count += 1
-        return f"L{self.label_count}"
+        self.label += 1
+        return f"L{self.label}"
 
-    def emit(self, instruction):
-        self.tac_code.append(instruction)
+    def emit(self, line):
+        self.code.append(line)
 
     def generate(self, node):
         if isinstance(node, list):
             for stmt in node:
                 self.generate(stmt)
-        
+
         elif isinstance(node, Assign):
-            expr_temp = self.generate(node.expr)
-            self.emit(f"{node.target} = {expr_temp}")
+            val = self.generate(node.expr)
+            self.emit(f"{node.target} = {val}")
 
         elif isinstance(node, BinOp):
-            left_temp = self.generate(node.left)
-            right_temp = self.generate(node.right)
-            temp = self.new_temp()
-            self.emit(f"{temp} = {left_temp} {node.op} {right_temp}")
-            return temp
+            l = self.generate(node.left)
+            r = self.generate(node.right)
+            t = self.new_temp()
+            self.emit(f"{t} = {l} {node.op} {r}")
+            return t
 
-        elif isinstance(node, Num):
-            return node.val
-
-        elif isinstance(node, Var):
-            return node.name
+        elif isinstance(node, Num): return node.val
+        elif isinstance(node, Var): return node.name
 
         elif isinstance(node, IfStmt):
-            cond_temp = self.generate(node.cond)
-            label_false = self.new_label()
-            label_end = self.new_label()
-            
-            self.emit(f"ifFalse {cond_temp} goto {label_false}")
+            c = self.generate(node.cond)
+            l1, l2 = self.new_label(), self.new_label()
+            self.emit(f"ifFalse {c} goto {l1}")
             self.generate(node.true_branch)
-            self.emit(f"goto {label_end}")
-            self.emit(f"{label_false}:")
+            self.emit(f"goto {l2}")
+            self.emit(f"{l1}:")
             self.generate(node.false_branch)
-            self.emit(f"{label_end}:")
+            self.emit(f"{l2}:")
 
         elif isinstance(node, WhileStmt):
-            label_start = self.new_label()
-            label_end = self.new_label()
-            
-            self.emit(f"{label_start}:")
-            cond_temp = self.generate(node.cond)
-            self.emit(f"ifFalse {cond_temp} goto {label_end}")
+            l1, l2 = self.new_label(), self.new_label()
+            self.emit(f"{l1}:")
+            c = self.generate(node.cond)
+            self.emit(f"ifFalse {c} goto {l2}")
             self.generate(node.body)
-            self.emit(f"goto {label_start}")
-            self.emit(f"{label_end}:")
+            self.emit(f"goto {l1}")
+            self.emit(f"{l2}:")
 
 # ==========================================
-# 5. DRIVER (Menu & File Handling)
+# 6. DRIVER (MENU DRIVEN)
 # ==========================================
 def main():
     while True:
-        print("\n=== Mini Compiler: TAC Generation ===")
-        print("1. Load and Generate TAC from test_program.txt")
-        print("2. Exit")
+        print("\n===== MINI COMPILER MENU =====")
+        print("1. Enter program manually")
+        print("2. Load program from file")
+        print("3. Exit")
+
         choice = input("Enter choice: ")
 
         if choice == '1':
-            filename = 'test_program2.txt'
-            try:
-                with open(filename, 'r') as file:
-                    source_code = file.read()
-                
-                print("\n--- Source Code ---")
-                print(source_code.strip())
+            print("\nEnter your program (end with blank line):")
+            lines = []
+            while True:
+                line = input()
+                if line.strip() == "": break
+                lines.append(line)
+            code = "\n".join(lines)
 
-                tokens = tokenize(source_code)
-                parser = Parser(tokens)
-                ast = parser.parse()
-
-                tac_gen = TACGenerator()
-                tac_gen.generate(ast)
-
-                print("\n--- Three-Address Code (TAC) ---")
-                for line in tac_gen.tac_code:
-                    print(line)
-
-            except FileNotFoundError:
-                print(f"\nError: File '{filename}' not found. Please create it.")
-            except Exception as e:
-                print(f"\nCompilation Error: {e}")
-        
         elif choice == '2':
+            filename = input("Enter filename: ")
+            try:
+                with open(filename, 'r') as f:
+                    code = f.read()
+            except:
+                print("File not found!")
+                continue
+
+        elif choice == '3':
             print("Exiting...")
-            sys.exit(0)
+            sys.exit()
         else:
-            print("Invalid choice. Try again.")
+            print("Invalid choice!")
+            continue
+
+        try:
+            print("\n--- Source Code ---")
+            print(code)
+
+            tokens = tokenize(code)
+            parser = Parser(tokens)
+            ast = parser.parse()
+
+            parser.symtab.display()
+
+            tac = TACGenerator()
+            tac.generate(ast)
+
+            print("\n--- TAC ---")
+            for line in tac.code:
+                print(line)
+
+        except Exception as e:
+            print("Error:", e)
 
 if __name__ == "__main__":
     main()
